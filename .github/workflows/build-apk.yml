@@ -19,13 +19,23 @@ jobs:
 
       - name: Check source archive
         run: |
-          if [ ! -f AutoClicker-Android-Source.zip ]; then
-            echo "Source ZIP not found in repository"
+          if [ ! -f "AutoClicker-Android-Source.zip" ]; then
+            echo "ERROR: Source ZIP not found"
             exit 1
           fi
 
+          unzip -t "AutoClicker-Android-Source.zip"
+
       - name: Extract project
-        run: unzip -o AutoClicker-Android-Source.zip
+        run: |
+          mkdir -p extracted
+          unzip -o "AutoClicker-Android-Source.zip" -d extracted
+
+          echo "=== Gradle files ==="
+          find extracted -type f \( \
+            -name "settings.gradle" -o \
+            -name "settings.gradle.kts" \
+          \)
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -33,24 +43,101 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Locate Android project
+        run: |
+          PROJECT_DIR=""
+
+          while IFS= read -r settings; do
+            dir="$(dirname "$settings")"
+
+            if [ -f "$dir/app/build.gradle" ] || \
+               [ -f "$dir/app/build.gradle.kts" ]; then
+              PROJECT_DIR="$dir"
+              break
+            fi
+          done < <(
+            find extracted -type f \( \
+              -name "settings.gradle" -o \
+              -name "settings.gradle.kts" \
+            \)
+          )
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Android project with app module not found"
+            find extracted -type f \( \
+              -name "build.gradle" -o \
+              -name "build.gradle.kts" -o \
+              -name "gradlew" \
+            \)
+            exit 1
+          fi
+
+          echo "Project directory: $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Prepare Gradle Wrapper
+        run: |
+          if [ -f "$PROJECT_DIR/gradlew" ]; then
+            chmod +x "$PROJECT_DIR/gradlew"
+            echo "Using Gradle Wrapper"
+          else
+            echo "Gradle Wrapper not found; using Gradle 8.9"
+          fi
 
-      - name: Install SDK components
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Install Android SDK components
+        run: |
+          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -f "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" \
+              -name sdkmanager -type f | head -n 1)"
+          fi
+
+          if [ -z "$SDKMANAGER" ] || [ ! -f "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found"
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --licenses || true
+
+          "$SDKMANAGER" \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
       - name: Build APK
-        working-directory: AutoClickerProject
-        run: gradle assembleDebug
+        run: |
+          cd "$PROJECT_DIR"
+
+          if [ -f "./gradlew" ]; then
+            ./gradlew assembleDebug --stacktrace
+          else
+            gradle assembleDebug --stacktrace
+          fi
+
+      - name: Find APK
+        run: |
+          APK_PATH="$(find "$PROJECT_DIR" -type f \
+            -path "*/build/outputs/apk/*/*.apk" | head -n 1)"
+
+          if [ -z "$APK_PATH" ]; then
+            echo "ERROR: APK was not created"
+            find "$PROJECT_DIR" -type f -name "*.apk"
+            exit 1
+          fi
+
+          echo "APK found: $APK_PATH"
+          echo "APK_PATH=$APK_PATH" >> "$GITHUB_ENV"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: AutoClicker-APK
-          path: AutoClickerProject/app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ env.APK_PATH }}
           if-no-files-found: error
+          retention-days: 7
